@@ -1,0 +1,191 @@
+---
+title: "Text Processing Hack"
+author: "Lea Frank"
+date: "May 3, 2018"
+output: 
+  html_document: 
+    highlight: tango
+    theme: cerulean
+editor_options: 
+  chunk_output_type: inline
+---
+
+
+```{r setup, include=FALSE}
+# Install and load required packages
+list.of.packages <- c("tidytext", "tidyverse", "stringr", "ggplot2", "reshape2", "rio", 
+                      "ggthemes", "wordcloud", "RColorBrewer")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])] 
+if (length(new.packages)) install.packages(new.packages, repos = "http://cran.us.r-project.org")
+lapply(list.of.packages, library, character.only = TRUE)
+
+# Knit options
+knitr::opts_chunk$set(echo = TRUE)
+``` 
+
+#Minihacks
+
+##Minihack 1: Tokenize & Remove Stop-Words
+
+The minihacks will use the presidents data file which contains the inaugural address for 17 US presidents along with their name, political party affiliation (Democrat, Republican, Other), and date of inaugural address. 
+
+```{r}
+#Read in the presidents data file 
+#Check data structure to make sure speech column is character and the party column is factor 
+presidents <- read.csv("presidents.csv")
+colnames(presidents) <- str_to_lower(colnames(presidents))
+
+#There are some white space in the inaugural speech. Trim the white space in the speech column (use str_squish to trim whitespace inside a string; str_trim only trims start and end of a string)
+presidents$speech <- presidents$speech %>% 
+  str_to_lower() %>% 
+  str_squish()
+  
+#Convert the speech data into Tidy Data format, one-token-per-document-per-row   
+pres <- presidents %>% 
+  unnest_tokens(word, speech)
+
+#print the head of the unnested data
+head(pres)
+
+#Count the most common words and notice that prior to removing stop-words, the most common words are things like "the", "a", etc... 
+pres %>% 
+  count(word, sort = TRUE)
+
+#Remove the stop-words in our speech data, notice the decrease in number of rows.
+stop_words <- stop_words
+pres <- pres %>% 
+  anti_join(stop_words)
+
+#After removing stop words, now use count to find most common words in the inaugural data
+pres %>% 
+  count(word, sort = TRUE)
+
+#What's up with the string 0097? It may have something to do with the way the speeches were coded (U+0097 in Unicode Character refers to 'END OF GUARDED AREA'). So let's remove "0097" from our analysis by creating a custom stop-word for "0097" and apply this to the data.
+custom_stop <- bind_rows(stop_words, data.frame(word = "0097",
+                                                lexicon = "custom"))
+pres <- pres %>% 
+  anti_join(custom_stop)
+
+#now lets see the top words again and make sure "0097" is not present anymore.
+pres %>% 
+  count(word, sort = TRUE)
+```
+
+##Minihack 2: Visualize the Most Commonly Used Words by Political Party
+
+Use ggplot2 to create a facet-wrapped horizontal (rather than the usual vertical) bar graph that represents the most commonly used words (n > 10) in the inaugural speech from each political party. Remove the label for the X axis. 
+```{r}
+pres_summary <- pres %>% 
+  group_by(party, word) %>% 
+  summarize(n = n())
+
+pres_summary %>% 
+  group_by(party) %>% 
+  top_n(10) %>% 
+  ungroup() %>% 
+  mutate(word = reorder(word, n)) %>% 
+  ggplot(aes(x = word, y = n, fill = party)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~party, scales = "free_y") +
+  coord_flip() +
+  labs(title = "Popular Language in Presidential Inaugural Speeches",
+       y = "Count") +
+  theme_hc() +
+  scale_fill_hc() +
+  theme(axis.title.y = element_blank())
+  
+```
+
+
+##Minihack 3: Create a Wordcloud
+
+Create a wordcloud for a political party or president of your choice.  
+
+```{r, warning=FALSE}
+pres_summary %>% 
+  filter(party == "democrat") %>% 
+  with(wordcloud(words = word, freq = n, max.words = 200,
+            colors = brewer.pal(9, "Blues"), random.order = FALSE, min.freq = 2,
+            scale = c(2,.75)))
+```
+
+##Minihack 4: Sentiment Analysis and Visualization
+
+Part 1: Run sentiment analysis using the `bing` sentiment lexicon to compares George Washington and Barack Obama's inaugural speech. 
+
+Part 2: Run sentiment analysis using the `nrc` lexicon and create a bar graph from the `nrc` sentiment analysis using data that takes into account each president's overall speech length (proportion rather than raw count). 
+
+**Part 1.**
+```{r}
+#Run sentiment analysis for George Washington and Barack Obama using the bing sentiment lexicon and return the total number of positive and negative sentiments in each president's inaugural speech (some data wrangling will be required such as group_by and summarise). The bing lexicon categorizes words in a binary fashion into positive and negative categories. 
+pres_samp <- pres %>% 
+  filter(str_detect(name, "ashington") |
+           str_detect(name, "bama"))
+
+pres_bing <- pres_samp %>% 
+  inner_join(get_sentiments("bing")) %>% 
+  count(name, word, sentiment, sort = TRUE)
+  
+pres_bing %>% 
+  filter(n > 1) %>% 
+  ggplot(aes(x = word, y = n, fill = sentiment)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  coord_flip() + 
+  facet_wrap(sentiment~name, scales = "free_y") +
+  theme_hc()
+
+#You may notice that while both presidents' speech has more count of positive sentiment words compared to negative sentiment words, Obama had greater overall total number of words compared to Washington (e.g., possibly an overall longer speech). This is something to take into account when conducting text analysis and something we'll do in Part 2.  
+```
+
+**Part 2.**
+
+Now we will run sentiment analysis using the nrc sentiment lexicon and visualize our results to compare between Washington and Obama. The nrc lexicon categorizes words in a binary fashion ("yes"/"no") into categories of positive, negative, anger, anticipation, disgust, fear, joy, sadness, surprise, and trust.  
+
+We completed the below steps for two randomly chosen presidents and this is the end visualization we are trying to achieve: 
+
+![](hack4.png)
+
+**Note**: We have provided one way to arrive at this visualization but we know that with R, there is always more than one solution. 
+
+```{r}
+#1) Run sentiment analysis for Washington and Obama using the nrc sentiment lexicon and summarise the total number of sentiments for each sentiment category (i.e., positive, negative, anger, anticipation, disgust, fear, joy, sadness, surprise, and trust) in each president's inaugural speech. 
+
+nrc <- get_sentiments("nrc")
+
+pres_sent <- pres_samp %>% 
+  inner_join(nrc)
+
+pres_sent_sum <- pres_sent %>% 
+  group_by(name, sentiment) %>% 
+  count(sentiment, sort = TRUE)
+
+#2) After obtaining the total number of sentiments for each category for Washington and Obama , create (mutate) a new "president" column and populate the column with each respective president's name (Obama, Washington). This will be needed to bind the 2 president's data together in step 5. 
+
+# I'm really not sure how or why this is necessary.
+
+#3) As mentioned earlier, Obama had greater overall total number of words compared to Washington (e.g., an overall longer speech). To take this into account in our sentiment analysis comparison, one way would be to create (mutate) a new "proportion" column that computes the number of sentiments in each category relative to the total sentiments for each president (proportion = sentiment / sum(sentiment)).
+
+pres_sent_sum <- pres_sent_sum %>% 
+  group_by(name) %>% 
+  mutate(total = sum(n)) %>% 
+  group_by(name, sentiment) %>% 
+  mutate(prop = n / total)
+
+#4) Save each president's data as its own object.
+
+#5) Rbind the two presidents' data
+
+#6) Use ggplot2 to create a bar graph that shows the proportion of sentiment in Washington and Obama's inaugural speech. 
+
+colnames(pres_sent_sum)[1] <- "President"
+pres_sent_sum %>% 
+  ungroup() %>% 
+  mutate(sentiment = reorder(sentiment, prop)) %>% 
+  ggplot(aes(x = sentiment, y = prop, fill = President)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_hc() +
+  scale_fill_hc() +
+  labs(title = "Sentiment of Inaugural Speeches",
+       x = "Sentiment", y = "Count") +
+  theme(legend.position = "bottom")
+```
