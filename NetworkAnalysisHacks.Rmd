@@ -1,0 +1,376 @@
+---
+title: "Network Analysis Minihacks"
+author: "Lea Frank"
+date: "May 24, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+list.of.packages <- c("tidytext", "tidyverse", "stringr", "ggplot2", "reshape2",
+                      "igraph", "qgraph", "rio")
+
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])] 
+if (length(new.packages)) {
+  install.packages(new.packages, repos = "http://cran.us.r-project.org")
+}
+
+lapply(X = list.of.packages, FUN = library, character.only = TRUE)
+
+```
+
+
+# Minihack 1: Text Analysis
+
+Pick a song, poem, or other text (several have been provided) and create an interesting co-occurrence graph. Suggestions to play with:
+
+1) With and without stop-words (will require altering the adjacency matrix code)
+
+2) The distance between words
+
+3) The weight threshold
+
+4) Grouping variables
+
+5) Layout (for options, see https://www.rdocumentation.org/packages/igraph/versions/0.7.1/topics/layout)
+
+```{r Minihack 1}
+
+######### Text Cleaning ######### 
+
+# Read in a text file as text
+poem <- readLines("Minihack1TextFiles/BohemianRhapsodyQueen.txt")
+
+head(poem)
+
+# Remove white space
+poem <- str_squish(poem) %>% 
+  # convert to data frame
+  as.data.frame(stringsAsFactors = FALSE) 
+
+# column name is "." - needs to be something easy to call
+colnames(poem) <- "Text"
+
+tidyPoem <- poem %>% 
+  unnest_tokens(output = word, input = Text)
+
+# To maintain order of words in poem
+tidyPoem$wordOrder <- 1:nrow(tidyPoem)
+
+
+# Function for matching words that are close by
+# Essentially offsets the "word" column by X# in each direction
+# next = the word after, prior = the word before
+     
+closeWords <- function(dataframe, distance) {
+  dataframe[, paste0("prior.", distance)] <- dataframe[(
+    # NA if words are at the beginning of poem
+    ifelse(dataframe$wordOrder - distance >= 1,
+           dataframe$wordOrder - distance, NA)), "word"]
+
+dataframe[, paste0("next.", distance)] <- dataframe[(
+  # NA if words are at the end of poem
+  ifelse(dataframe$wordOrder + distance <= nrow(dataframe),
+         dataframe$wordOrder + distance, NA)), "word"]
+return(dataframe)
+}
+
+
+# select words 1-3 away
+# Any distance is fine! What matters to you will change based on the text.
+for (i in 1:6) {
+  tidyPoem <-  closeWords(dataframe = tidyPoem, distance = i)
+}
+rm(i)
+
+# Melt to create a DF that represents the relation between words
+# rows = 6 instances of each word
+# wordPair = the word X# before or after that word in the poem
+buildingMatrix <- tidyPoem %>% 
+  melt(id.vars = c("word", "wordOrder"),
+       variable.name = "relation",  
+       value.name = "wordPair")
+
+# Maximum distance between nodes
+maxWeight <- 6
+
+# So relations 1 word apart are weighted = 3, 3 words apart = 1, farther = 0
+buildingMatrix$weight <- ifelse(is.na(buildingMatrix$wordPair), 0,
+  # reverse code
+  maxWeight + 1 - 
+  # distance from word
+  as.numeric(str_sub(buildingMatrix$relation, start = -1)))
+
+# Turn it into a weighted matrix
+# Full = all 236 words in the poem
+adjacencyMatrix <- dcast(
+  data = buildingMatrix, 
+  formula = word ~ wordPair, 
+  value.var = "weight")
+
+# Make row names words 
+rownames(adjacencyMatrix) <- adjacencyMatrix$word
+# Remove columns "word" and "NA"
+adjacencyMatrix <- 
+  adjacencyMatrix[, names(adjacencyMatrix) != c("word", "NA")] %>% 
+  # convert to matrix
+  as.matrix
+
+# Insert NAs for duplicates
+adjacencyMatrix[lower.tri(adjacencyMatrix,diag = FALSE)] <- NA
+
+# head(adjacencyMatrix)
+
+# nodeList with no-stop-words
+nodeList <- tidyPoem %>% 
+  anti_join(stop_words) %>% 
+  # Repetitions of each word - for node size later
+  # sort = FALSE: keep in same order as matrix
+  count(word, sort = FALSE) %>% 
+  # Classifications of words
+  left_join(get_sentiments("bing"))
+
+# head(nodeList)
+
+# Select only those rows and columns where the words appear in the nodeList 
+# AKA - limit to Cat in the Hat without stop words
+adjacencyMatrix <- adjacencyMatrix[
+  which(rownames(adjacencyMatrix) %in% nodeList$word),  
+  colnames(adjacencyMatrix) %in% nodeList$word]
+
+# Check that the matrix and nodelist are looking at the same things
+all.equal(rownames(adjacencyMatrix), colnames(adjacencyMatrix), nodeList$word)
+
+# head(adjacencyMatrix)
+
+######### Start Graphing ######### 
+library(igraph)
+
+bohemian_graph <- graph.adjacency(
+  adjmatrix = adjacencyMatrix, 
+  mode = "undirected", 
+  weighted = TRUE)
+
+# Make the vertex size proportionate to the number of repetitions (vertex = node)
+colnames(nodeList) <- c("name", "size", "sentiment")
+vertex.attributes(bohemian_graph) <- nodeList
+
+# Make the line widths porportionate to the number of times the words co-occur (the weight)
+edge.attributes(bohemian_graph)$width <- E(bohemian_graph)$weight
+
+# color the nodes based on sentiment
+# There is no easy way to do this like in ggplot
+nodeList$color = ifelse(is.na(nodeList$sentiment), "mediumpurple1",
+                           ifelse(nodeList$sentiment == "negative", "red", "green"))
+vertex.attributes(bohemian_graph) <- nodeList
+
+# Check to make sure it worked
+vertex.attributes(bohemian_graph)
+
+
+# Add some color
+# Plot above threshold
+min <- 1 
+plot(bohemian_graph,
+     asp = 0,
+     edge.weight = ifelse(E(bohemian_graph)$weight > min,
+                          E(bohemian_graph)$weight,
+                          NA),
+     edge.width = ifelse(E(bohemian_graph)$weight > min,
+                         E(bohemian_graph)$weight, 
+                         NA),
+     layout = layout.fruchterman.reingold, #this is default
+            vertex.label.color = "black", 
+            vertex.color = adjustcolor(col = V(bohemian_graph)$color, 
+                                       alpha.f = 0.6),
+            vertex.frame.color = adjustcolor(col = "indianred4", alpha.f = .4), 
+            vertex.label.cex = 1, #size of the label text. 1 is default
+            edge.color = "indianred4",
+            main = "Bohemian Rhapsody")
+
+detach(package:igraph)
+```
+
+# MiniHack 2: Correlational Network with NPI
+
+For this hack, you'll be working with __real data__ that I downloaded from osf (https://osf.io/zypgf/). These data come from a study on cohort differences in Narcissism by Wetzel et al. (2017). The data I've provided has been cleaned so that it only contains responses to the Narcissistic Personality Inventory (NPI). In addition to the data, the folder I've shared also has a word document with the text of the items NPI with key.docx (from Del Paulhus's website); this might be helpful in making sense of what you find. Your job for this hack is to:
+
+1. Produce a correlation network graph of NPI items
+    * Choose a threshold that you can justify, and justify it.
+        * hint: "sig" is probably easy to justify, but there are other good ones.
+
+2. Run a community detection algorithm on the NPI correlation network
+    * Report how many communities you find.
+    * Produce a network graph where nodes are colored by community.
+
+3. Get and interpret Measure(s) of Centrality for the NPI correlation network
+    * What are some highly central items?
+    * What do you make of that?
+    * Does it look like some communities are more central?
+        * hint: it may be helpful to make a graph with that info
+
+4. Assess the extent to which the NPI could be characterized as a smallworld
+
+```{r npi_data_load}
+library(qgraph)
+library(igraph)
+npi_df <- import("npi_data_cln.csv")
+```
+
+```{r make_net}
+# produce correlation network
+# remember, qgraph() is the function,
+# and you'll want to pass in a correlation
+# matrix using cor()
+#
+# don't forget about the threshold argument!
+# and don't forget about the sampleSize argument (if relevant).
+# layout is also worth looking into (spring is my favorite).
+
+npi_net <- qgraph(cor(na.omit(npi_df)),
+              threshold = .15,
+              layout = "spring",
+              sampleSize = nrow(na.omit(npi_df))) 
+```
+
+```{r community}
+# turn your graph into an igraph object
+# pass that igraph object to one of the community
+# detection algorithms
+# I used cluster_walktrap(), but there are other
+# options - feel free to try one of the others.
+
+# Couple more hints:
+# chunks 10-12 may be good ones to check out.
+# the groups argument (in qgraph) will probably be helpful!
+# and the community $membership from the community objct will be too.
+#
+# you may want to use length() in combination with unique() too.
+# REMEMBER: if you're using qgraph to draw the network, make
+# sure you pass it the qgraph and not the igraph object
+
+npi_igraph <- npi_net %>% 
+  as.igraph()
+
+npi_net_communities <- cluster_walktrap(npi_igraph)
+
+# look at how membership is recorded
+head(npi_net_communities$membership)
+
+# how many communities?
+length(unique(npi_net_communities$membership))
+
+# make sure you use the twitter_net object
+# not the igraph object
+qgraph(npi_net,
+       groups = npi_net_communities$membership)
+```
+
+```{r centrality}
+# get centrality measures on the NPI network
+# centrality_auto() is an easy function to use.
+# node.centralaity object (within the centrality_auto() function)
+# is especially useful for our purposes.
+
+# you may want to combine the visual of coloring nodes
+# by community with sizing nodes by centrality.
+# so don't forget about the vsize argument in qgraph.
+# also, vsize can be tricky for some centrality measures; you may need
+# to divide the centrality measure by something if you are using it in vsize
+# (e.g., I divided betweenness by 100 for the graph a little ways above)
+
+npi_cent <- centrality_auto(npi_net)
+npi_node_cent <- as_tibble(npi_cent$node.centrality, rownames = "item")
+npi_node_cent
+
+qgraph(npi_net, 
+       vsize = (npi_node_cent$Betweenness/15),
+       groups = npi_net_communities$membership,
+       layout = "spring")
+```
+
+```{r smallworld}
+# you'll probably want to use smallworldIndex() since it is quicker.
+# and you can use that one right on a qgraph() object.
+
+smallworldIndex(npi_net)
+```
+
+# Minihack 3: Twitter follower network
+
+For this hack, you'll be working with another sample of twitter users (a subsample from the same larger sample the example data came from). The data are in the form of an edgelist, and remember, twitter ties are direct (A can follow B without B following A); this may limit what you can do. Your task for this minihack is to:
+
+1. Vizualize the network
+2. Find & Visualize communities
+    * you have to use walktrap for this one, since it's a directed graph.
+3. Report __useful__ centrality indices.
+4. Visualize centrality in the network
+    * Make the size of nodes correspond to some useful centrality measure.
+
+
+```{r tw_data_load_and_prep}
+twitter_hack_df <- import("twitter_hack_sample.csv") %>% 
+  # need to remove missing data
+  na.omit() %>%
+  # Next, make sure the node_id and alter_id variables
+  # are character variables. 
+  mutate_if(is.numeric, as.character)
+```
+
+```{r tw_make_net}
+# Produce a network from the twitter
+# edge list.
+# hint: this should be pretty easy for this network
+
+twitter_net <- twitter_hack_df %>% 
+  qgraph()
+```
+
+```{r tw_community}
+# turn your graph into an igraph object
+# pass that igraph object to one of the community
+# detection algorithms
+# You will need to use
+# cluster_walktrap() since this is a directed graph
+
+# chunks 10-12 may be good ones to check out.
+# the groups argument (in qgraph) will probably be helpful!
+# and the community $membership from the community objct will be too.
+
+twitter_igraph <- twitter_net %>% 
+  as.igraph()
+
+twitter_net_communities <- cluster_walktrap(twitter_igraph)
+
+# look at how membership is recorded
+head(twitter_net_communities$membership)
+
+# how many communities?
+length(unique(twitter_net_communities$membership))
+
+# make sure you use the twitter_net object
+# not the igraph object
+qgraph(twitter_net,
+       groups = twitter_net_communities$membership)
+```
+
+```{r tw_centrality}
+# get centrality measures on the twitter network
+# like in the npi data,
+# centrality_auto() is an easy function to use.
+# node.centralaity object (within the centrality_auto() function)
+
+# make sure you make the node size vary according to centrality.
+# depending on which measure you choose, you may need to divide 
+# that centrality measure to make the graph work.
+
+twitter_cent <- centrality_auto(twitter_net)
+twitter_node_cent <- as_tibble(twitter_cent$node.centrality, rownames = "item")
+twitter_node_cent
+
+qgraph(twitter_net, 
+       vsize = (twitter_node_cent$Betweenness/5),
+       groups = twitter_net_communities$membership,
+       layout = "spring")
+```
